@@ -125,6 +125,7 @@ typedef struct {
     struct cuda_ah_info *cuda_ah;
     nvshmemi_efagda_device_key_t *lkeys;
     nvshmemi_efagda_device_key_t *rkeys;
+    int *lock;
 } nvshmemi_efagda_device_state_t;
 /* TODO static assert for exact size of efagda_device_state_t */
 static_assert(sizeof(nvshmemi_efagda_device_state_t) <= sizeof(nvshmemi_device_transport_state_t),
@@ -142,6 +143,7 @@ static_assert(sizeof(nvshmemi_efagda_device_state_t) <= sizeof(nvshmemi_device_t
         state.cuda_ah = NULL;                                               \
         state.lkeys = NULL;                                                 \
         state.rkeys = NULL;                                                 \
+        state.lock = NULL;                                                  \
     } while (0);
 
 // External declaration of the host-side EFA GDA device state

@@ -233,10 +233,9 @@ int gdrcopy_amo_ack(nvshmem_transport_t transport, nvshmemt_libfabric_endpoint_t
                     int pe, int is_proxy) {
     nvshmemt_libfabric_state_t *libfabric_state = (nvshmemt_libfabric_state_t *)transport->state;
 
-    // if (dest_addr > 3) {
-    //     printf("[PE %d] gdrcopy_amo_ack: Sending put-signal ACK to PE %d, dest_addr=%d, is_proxy=%d\n",
-    //        transport->my_pe, pe, (int) dest_addr, is_proxy);
-    // }
+    fprintf(stderr, "[PE %d] gdrcopy_amo_ack: Sending put-signal ACK to PE %d, dest_addr=%d, is_proxy=%d\n",
+            transport->my_pe, pe, (int) dest_addr, is_proxy);
+
     nvshmemt_libfabric_gdr_op_ctx_t *resp_op = NULL;
     uint64_t num_retries = 0;
     int status;
@@ -490,14 +489,14 @@ int nvshmemt_libfabric_put_signal_completion(nvshmem_transport_t transport,
     if (is_write_comp) {
         map_key = *addr << 32 | (uint32_t)entry->data;
         progress_count = -1;
-        // printf("[PE %d] libfabric_put_signal_completion: Write Completion, map_key=0x%lx, seq=%u, addr: %d\n",
-        //        transport->my_pe, map_key,  (uint32_t)entry->data, (int) *addr);
+        fprintf(stderr, "[PE %d] libfabric_put_signal_completion: Write Completion, map_key=0x%lx, seq=%u, addr: %d\n",
+                transport->my_pe, map_key,  (uint32_t)entry->data, (int) *addr);
     } else {
         sig_op = (nvshmemt_libfabric_gdr_signal_op *) container_of(entry->op_context, nvshmemt_libfabric_gdr_op_ctx_t, ofi_context);
         map_key = *addr << 32 | sig_op->sequence_count;
         progress_count = (int)sig_op->num_writes;
-        // printf("[PE %d] libfabric_put_signal_completion: Signal Completion, map_key=0x%lx, seq=%u, num_writes=%d, addr: %d\n",
-        //        transport->my_pe, map_key, sig_op->sequence_count, sig_op->num_writes, (int) *addr);
+        fprintf(stderr, "[PE %d] libfabric_put_signal_completion: Signal Completion, map_key=0x%lx, seq=%u, num_writes=%d, addr: %d\n",
+               transport->my_pe, map_key, sig_op->sequence_count, sig_op->num_writes, (int) *addr);
 
         /* The EFA provider has an inline send size of 32 bytes.
          * The gdr atomic fi_send message is 72 bytes and does not
@@ -521,8 +520,8 @@ int nvshmemt_libfabric_put_signal_completion(nvshmem_transport_t transport,
         if (is_write_comp) {
             op = iter->second.first;
         }
-        // printf("[PE %d] libfabric_put_signal_completion: Performing Atomic, map_key=0x%lx, addr=%d, op=%d, target_addr=%p, swap_add=%lu, src_pe=%d\n",
-        //        transport->my_pe, map_key, (int) op->src_addr, op->send_amo.op, op->send_amo.target_addr, op->send_amo.swap_add, op->send_amo.src_pe);
+        fprintf(stderr, "[PE %d] libfabric_put_signal_completion: Performing Atomic, map_key=0x%lx, addr=%d, op=%d, target_addr=%p, swap_add=%lu, src_pe=%d\n",
+               transport->my_pe, map_key, (int) op->src_addr, op->send_amo.op, op->send_amo.target_addr, op->send_amo.swap_add, op->send_amo.src_pe);
         perform_gdrcopy_amo<uint64_t>(transport, op, is_proxy);
         ep->proxy_put_signal_comp_map->erase(iter);
         status = fi_recv(ep->endpoint, op, NVSHMEM_STAGED_AMO_WIREDATA_SIZE,

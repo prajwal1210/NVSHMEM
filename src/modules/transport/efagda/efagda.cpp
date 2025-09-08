@@ -539,6 +539,14 @@ static int nvshmemt_efagda_populate_device_state(nvshmem_transport_t t) {
     status = cudaMemcpy(efagda_state->put_signal_seq_counter, &initial_value, sizeof(uint32_t), cudaMemcpyHostToDevice);
     NVSHMEMI_NE_ERROR_JMP(status, cudaSuccess, NVSHMEMX_ERROR_INTERNAL, out, "cudaMemcpy for put_signal_seq_counter initialization failed.\n");
     device_state->put_signal_seq_counter = efagda_state->put_signal_seq_counter;
+    
+    // Allocate lock in device memory
+    status = cudaMalloc(&efagda_state->device_lock, sizeof(int));
+    NVSHMEMI_NE_ERROR_JMP(status, cudaSuccess, NVSHMEMX_ERROR_INTERNAL, out, "cudaMalloc for lock failed.\n");
+    status = cudaMemset(efagda_state->device_lock, 0, sizeof(int));
+    NVSHMEMI_NE_ERROR_JMP(status, cudaSuccess, NVSHMEMX_ERROR_INTERNAL, out, "cudaMemset for lock failed.\n");
+    device_state->lock = efagda_state->device_lock;
+    
     INFO(efagda_state->log_level, "EFA GDA: Populated device state with n_pes=%d, my_pe=%d\n", device_state->n_pes, device_state->my_pe);
 out:
     return status;
@@ -687,6 +695,12 @@ static int nvshmemt_efagda_finalize(nvshmem_transport_t t) {
         cudaFree(efagda_state->device_rkeys_d);
     efagda_state->device_lkeys.clear();
     efagda_state->device_rkeys.clear();
+
+    // Free device lock
+    // if (efagda_state->device_lock) {
+    //     cudaFree(efagda_state->device_lock);
+    //     efagda_state->device_lock = NULL;
+    // }
 
     status = nvshmemt_libfabric_finalize(t);
     return status;

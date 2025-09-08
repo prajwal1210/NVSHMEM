@@ -61,6 +61,23 @@
 #define container_of(ptr, type, field) \
 	((type *) ((char *)ptr - offsetof(type, field)))
 
+#ifndef ACCESS_ONCE
+#define ACCESS_ONCE(x) (*(volatile typeof(x) *)&(x))
+#endif
+
+#ifndef WRITE_ONCE
+#define WRITE_ONCE(x, v) (ACCESS_ONCE(x) = (v))
+#endif
+
+// Prevent code reordering from both compiler and GPU
+__device__ NVSHMEMI_STATIC NVSHMEMI_DEVICE_ALWAYS_INLINE void EFAGDA_MFENCE() {
+    __threadfence_block();
+}
+
+__device__ NVSHMEMI_STATIC NVSHMEMI_DEVICE_ALWAYS_INLINE void efagda_atomic_set(int *ptr, int val) {
+    WRITE_ONCE(*ptr, val);
+}
+
 __device__ uint32_t efa_cq_get_current_index(const efa_cq* cq) {
     return cq->consumed_cnt & cq->queue_mask;
 }
@@ -455,6 +472,45 @@ efagda_cal_transfer_size(size_t req_size, size_t lchunk_size, size_t rchunk_size
                         NVSHMEMI_MIN(req_size, NVSHMEMI_MIN(rchunk_size, lchunk_size)));
 }
 
+template <threadgroup_t SCOPE>
+__device__ NVSHMEMI_STATIC NVSHMEMI_DEVICE_ALWAYS_INLINE void efagda_lock_acquire(int *lock) {
+    if (!lock) {
+        nvshmemi_efagda_device_state_t *state = efagda_get_device_transport_state();
+        printf("Error, EFA GDA: pe=%d efagda_lock_acquire is NULL \n",
+               state->my_pe);
+        return;
+    }
+
+    if (nvshmemi_thread_id_in_threadgroup<SCOPE>() == 0)
+        while (atomicCAS(lock, 0, 1) == 1)
+            ;  // Wait until we get the lock.
+
+    if (SCOPE == NVSHMEMI_THREADGROUP_THREAD)
+        EFAGDA_MFENCE();  // Prevent reordering before lock is acquired.
+
+    // For other scopes, __syncwarp / __syncthreads guarantee the ordering
+    nvshmemi_threadgroup_sync<SCOPE>();
+}
+
+template <threadgroup_t SCOPE>
+__device__ NVSHMEMI_STATIC NVSHMEMI_DEVICE_ALWAYS_INLINE void efagda_lock_release(int *lock) {
+    if (!lock) {
+        nvshmemi_efagda_device_state_t *state = efagda_get_device_transport_state();
+        printf("Error, EFA GDA: pe=%d efagda_lock_acquire is NULL \n",
+               state->my_pe);
+        return;
+    }
+
+    // For other scopes, __syncwarp / __syncthreads guarantee the ordering
+    nvshmemi_threadgroup_sync<SCOPE>();
+
+    if (SCOPE == NVSHMEMI_THREADGROUP_THREAD)
+        EFAGDA_MFENCE();  // Prevent reordering before lock is released.
+
+    if (nvshmemi_thread_id_in_threadgroup<SCOPE>() == 0)
+        efagda_atomic_set(lock, 0);
+}
+
 __device__ NVSHMEMI_DEVICE_ALWAYS_INLINE void efagda_get_lkey(
     uint64_t addr, uint32_t *out_lkey, size_t *out_chunk_size) {
     nvshmemi_efagda_device_state_t *state = efagda_get_device_transport_state();
@@ -471,7 +527,7 @@ __device__ NVSHMEMI_DEVICE_ALWAYS_INLINE void efagda_get_lkey(
         return;
     }
 
-    printf("EFA GDA: pe=%d efagda_get_lkey out of bounds - idx=%lu, max=%lu\n",
+    printf("Error, EFA GDA: pe=%d efagda_get_lkey out of bounds - idx=%lu, max=%lu\n",
            state->my_pe, idx, (nvshmemi_device_state_d.heap_size >> log2_granularity));
     assert(0);
 }
@@ -497,7 +553,7 @@ __device__ NVSHMEMI_DEVICE_ALWAYS_INLINE void efagda_get_raddr_rkey(
         return;
     }
 
-    printf("EFA GDA: pe=%d efagda_get_raddr_rkey out of bounds - idx=%lu, max=%lu\n",
+    printf("Error: EFAGDA pe=%d efagda_get_raddr_rkey out of bounds - idx=%lu, max=%lu\n",
             state->my_pe, idx, (nvshmemi_device_state_d.heap_size >> log2_granularity) * npes);
     assert(0);
 
@@ -518,12 +574,12 @@ template <threadgroup_t SCOPE, nvshmemi_op_t channel_op>
 __device__ NVSHMEMI_DEVICE_ALWAYS_INLINE void nvshmemi_efagda_rma_nbi(void *rptr, void *lptr,
                                                                       size_t bytes, int dst_pe) {
     nvshmemi_threadgroup_sync<SCOPE>();
-    int my_tid = nvshmemi_thread_id_in_threadgroup<NVSHMEMI_THREADGROUP_WARP>();
+    int my_tid = nvshmemi_thread_id_in_threadgroup<SCOPE>();
     if (my_tid == 0) {
         nvshmemi_efagda_device_state_t *state = efagda_get_device_transport_state();
+        efagda_lock_acquire<NVSHMEMI_THREADGROUP_THREAD>(state->lock);
 
         struct efa_qp *qp = state->cuda_qp;
-
         uint16_t ah;
         uint16_t remote_qpn;
         uint32_t remote_qkey;
@@ -556,6 +612,7 @@ __device__ NVSHMEMI_DEVICE_ALWAYS_INLINE void nvshmemi_efagda_rma_nbi(void *rptr
         }
 
         efagda_flush_send_wrs(qp);
+        efagda_lock_release<NVSHMEMI_THREADGROUP_THREAD>(state->lock);
     }
 
     nvshmemi_threadgroup_sync<SCOPE>();
@@ -564,9 +621,10 @@ __device__ NVSHMEMI_DEVICE_ALWAYS_INLINE void nvshmemi_efagda_rma_nbi(void *rptr
 template <threadgroup_t SCOPE>
 __device__ NVSHMEMI_DEVICE_ALWAYS_INLINE void nvshmemi_efagda_quiet() {
     nvshmemi_threadgroup_sync<SCOPE>();
-    int my_tid = nvshmemi_thread_id_in_threadgroup<NVSHMEMI_THREADGROUP_WARP>();
+    int my_tid = nvshmemi_thread_id_in_threadgroup<SCOPE>();
     if (my_tid == 0) {
         nvshmemi_efagda_device_state_t *state = efagda_get_device_transport_state();
+        efagda_lock_acquire<NVSHMEMI_THREADGROUP_THREAD>(state->lock);
         int result;
         ibv_wc wc;
 
@@ -574,13 +632,14 @@ __device__ NVSHMEMI_DEVICE_ALWAYS_INLINE void nvshmemi_efagda_quiet() {
             efa_poll_cq(state->cuda_cq, 1, &wc, &result);
             if (result > 0) {
                 if (wc.vendor_err != 0) {
-                    printf("[PE %d] ERROR: Thread 0 got completion, wr_id=%lu, vendor_error=%lu\n",
+                    printf("ERROR: EFAGDA pe=%d thread 0 got completion, wr_id=%lu, vendor_error=%lu\n",
                             state->my_pe, (unsigned long)wc.wr_id, (unsigned long)wc.vendor_err);
                 }
 
                 atomicAdd(&state->cuda_qp->sq.wq.wqes_completed, 1);
             }
         }
+       efagda_lock_release<NVSHMEMI_THREADGROUP_THREAD>(state->lock);
     }
     nvshmemi_threadgroup_sync<SCOPE>();
 }
@@ -590,9 +649,10 @@ __device__ NVSHMEMI_DEVICE_ALWAYS_INLINE void nvshmemi_efagda_put_signal(
     void *rptr, void *lptr, size_t bytes, void *sig_rptr, uint64_t signal, nvshmemi_amo_t sig_op,
     int pe, bool is_nbi) {
     nvshmemi_threadgroup_sync<SCOPE>();
-    int my_tid = nvshmemi_thread_id_in_threadgroup<NVSHMEMI_THREADGROUP_WARP>();
+    int my_tid = nvshmemi_thread_id_in_threadgroup<SCOPE>();
     if (my_tid == 0) {
         nvshmemi_efagda_device_state_t *state = efagda_get_device_transport_state();
+        efagda_lock_acquire<NVSHMEMI_THREADGROUP_THREAD>(state->lock);
         struct efa_qp *qp = state->cuda_qp;
 
         uint32_t imm_data, new_val;
@@ -664,14 +724,14 @@ __device__ NVSHMEMI_DEVICE_ALWAYS_INLINE void nvshmemi_efagda_put_signal(
         // For fence()/quiet() correctness, the RX host proxy will send back
         // a write w/imm after the atomic has been applied on the RX side.
         atomicAdd(&qp->sq.wq.wqes_posted, 1);
+
+        efagda_lock_release<NVSHMEMI_THREADGROUP_THREAD>(state->lock);
     }
     nvshmemi_threadgroup_sync<SCOPE>();
 
     if (!is_nbi) {
-        printf("[PE %d] efagda_put_signal: calling quiet\n", nvshmemi_device_state_d.mype);
         nvshmemi_efagda_quiet<SCOPE>();  // TODO This is not an efficient implementation, but it should be correct.
     }
-    // printf("[PE %d] efagda_put_signal: DONE\n", nvshmemi_device_state_d.mype);
 }
 
 template <threadgroup_t SCOPE, nvshmemi_op_t channel_op>
@@ -683,7 +743,7 @@ __device__ NVSHMEMI_DEVICE_ALWAYS_INLINE void nvshmemi_efagda_rma(void *rptr, vo
 
 __device__ NVSHMEMI_DEVICE_ALWAYS_INLINE void nvshmemi_efagda_enforce_consistency_at_target(
     bool use_membar) {
-    printf("[PE %d] nvshmemi_efagda_enforce_consistency_at_target: Not Implemented\n", nvshmemi_device_state_d.mype);
+    printf("Error: EFAGDA pe=%d nvshmemi_efagda_enforce_consistency_at_target: Not Implemented\n", nvshmemi_device_state_d.mype);
 }
 
 #endif /* _NVSHMEMI_EFAGDA_DEVICE_H_ */
