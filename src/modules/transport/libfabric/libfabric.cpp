@@ -1056,6 +1056,42 @@ out:
     return status;
 }
 
+int nvshmemt_put_signal_waw(struct nvshmem_transport *tcurr, int pe, rma_verb_t write_verb,
+                               std::vector<rma_memdesc_t> &write_remote,
+                               std::vector<rma_memdesc_t> &write_local,
+                               std::vector<rma_bytesdesc_t> &write_bytes_desc, amo_verb_t sig_verb,
+                               amo_memdesc_t *sig_target, amo_bytesdesc_t sig_bytes_desc, int is_proxy) {
+    int status = 0;
+
+    // Basic sanity
+    assert(tcurr);
+    assert(tcurr->host_ops.rma);
+    assert(tcurr->host_ops.amo);
+    assert(write_remote.size() == write_local.size() &&
+           write_local.size() == write_bytes_desc.size());
+
+    // 1) Post all payload writes (no fence, no completion by default)
+    for (size_t i = 0; i < write_remote.size(); ++i) {
+        status = tcurr->host_ops.rma(tcurr, pe, write_verb,
+                                     &write_remote[i], &write_local[i],
+                                     write_bytes_desc[i], is_proxy);
+        if (unlikely(status)) goto out;
+    }
+
+    // 2) Post the signal as an AMO (or small write) — ordered because of FI_ORDER_WAW
+    status = tcurr->host_ops.amo(tcurr, pe,
+                                 /*ctx*/ NULL,
+                                 sig_verb, sig_target, sig_bytes_desc, is_proxy);
+out:
+    if (status) {
+    NVSHMEMI_ERROR_PRINT(
+            "Received error %d when trying to perform a nvshmemt_put_signal_fenced operation.\n",
+            status);
+        status = NVSHMEMX_ERROR_INTERNAL;
+    }
+    return status;
+}
+
 static int nvshmemt_libfabric_enforce_cst(struct nvshmem_transport *tcurr) {
     nvshmemt_libfabric_state_t *libfabric_state = (nvshmemt_libfabric_state_t *)tcurr->state;
     uint64_t num_retries = 0;
@@ -1542,6 +1578,11 @@ static int nvshmemt_libfabric_connect_endpoints(nvshmem_transport_t t, int *sele
     if ((state->provider == NVSHMEMT_LIBFABRIC_PROVIDER_SLINGSHOT) ||
         (state->provider == NVSHMEMT_LIBFABRIC_PROVIDER_EFA)) {
         state->prov_info->tx_attr->op_flags = FI_TRANSMIT_COMPLETE;
+    }
+
+    if (state->provider == NVSHMEMT_LIBFABRIC_PROVIDER_SLINGSHOT) {
+        state->prov_info->tx_attr->msg_order |= FI_ORDER_WAW;
+        state->prov_info->rx_attr->msg_order |= FI_ORDER_WAW;
     }
 
     cntr_attr.events = FI_CNTR_EVENTS_COMP;
@@ -2153,6 +2194,8 @@ int nvshmemt_init(nvshmem_transport_t *t, struct nvshmemi_cuda_fn_table *table, 
 
     if (libfabric_state->provider == NVSHMEMT_LIBFABRIC_PROVIDER_EFA) {
         transport->host_ops.put_signal = nvshmemt_put_signal_unordered;
+    } else if (libfabric_state->provider == NVSHMEMT_LIBFABRIC_PROVIDER_SLINGSHOT) {
+        transport->host_ops.put_signal = nvshmemt_put_signal_waw;
     } else {
         transport->host_ops.put_signal = nvshmemt_put_signal;
     }
